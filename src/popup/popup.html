@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup">
+    <!-- Pending Preview Banner (shown when side panel mode has pending preview) -->
+    <div id="pendingPreviewBanner" class="pending-preview-banner" style="display: none;">
+      <div class="pending-preview-info">
+        <strong>Preview Ready</strong>
+        <span id="pendingPreviewPath" class="pending-preview-path"></span>
+      </div>
+      <button id="openSidePanelBtn" class="primary open-sidepanel-btn">Open in Side Panel</button>
+    </div>
+
+    <h2>GitHub Token Settings</h2>
+    <p class="description">
+      A Personal Access Token is required to access private repositories.
+      Public repositories work without a token (with lower rate limits).
+    </p>
+
+    <div class="input-group">
+      <label for="token">GitHub Token:</label>
+      <input type="password" id="token" placeholder="ghp_xxxxxxxxxxxx">
+    </div>
+
+    <div class="button-group">
+      <button id="saveBtn" class="primary">Save</button>
+      <button id="testBtn">Test Connection</button>
+      <button id="clearBtn" class="danger">Clear</button>
+    </div>
+
+    <div id="status"></div>
+
+    <div class="setting-group">
+      <label for="displayMode">Preview Display Mode</label>
+      <select id="displayMode">
+        <option value="tab">Open in new tab</option>
+        <option value="sidepanel">Side Panel (split view)</option>
+      </select>
+      <p class="setting-description">Side Panel shows preview alongside the PR page</p>
+    </div>
+
+    <div class="help">
+      <a href="https://github.com/settings/tokens/new?scopes=repo&description=GitHub%20PR%20HTML%20Preview" target="_blank">
+        Create a new token (repo scope required)
+      </a>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

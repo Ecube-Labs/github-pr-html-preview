@@ -1,0 +1,248 @@
+/**
+ * GitHub PR HTML Preview - Popup Styles
+ */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #24292f;
+  background: #ffffff;
+}
+
+.popup {
+  width: 320px;
+  padding: 16px;
+}
+
+/* Pending Preview Banner */
+.pending-preview-banner {
+  background: linear-gradient(135deg, #0969da 0%, #0550ae 100%);
+  color: #ffffff;
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.pending-preview-info {
+  margin-bottom: 10px;
+}
+
+.pending-preview-info strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.pending-preview-path {
+  font-size: 11px;
+  opacity: 0.9;
+  word-break: break-all;
+  display: block;
+}
+
+.open-sidepanel-btn {
+  width: 100%;
+  background: #ffffff !important;
+  color: #0969da !important;
+  border-color: #ffffff !important;
+  font-size: 13px !important;
+  padding: 10px 12px !important;
+}
+
+.open-sidepanel-btn:hover {
+  background: #f0f6fc !important;
+}
+
+h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #24292f;
+}
+
+.description {
+  font-size: 12px;
+  color: #57606a;
+  margin-bottom: 16px;
+}
+
+.input-group {
+  margin-bottom: 12px;
+}
+
+.input-group label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #24292f;
+  margin-bottom: 4px;
+}
+
+.input-group input {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 14px;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #f6f8fa;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.input-group input:focus {
+  outline: none;
+  border-color: #0969da;
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.1);
+}
+
+.input-group input::placeholder {
+  color: #8c959f;
+}
+
+.button-group {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+button {
+  flex: 1;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+button.primary {
+  background: #2da44e;
+  color: #ffffff;
+  border-color: #2da44e;
+}
+
+button.primary:hover {
+  background: #2c974b;
+  border-color: #2c974b;
+}
+
+button:not(.primary):not(.danger) {
+  background: #f6f8fa;
+  color: #24292f;
+  border-color: #d0d7de;
+}
+
+button:not(.primary):not(.danger):hover {
+  background: #f3f4f6;
+  border-color: #c7ccd1;
+}
+
+button.danger {
+  background: #ffffff;
+  color: #cf222e;
+  border-color: #d0d7de;
+}
+
+button.danger:hover {
+  background: #cf222e;
+  color: #ffffff;
+  border-color: #cf222e;
+}
+
+.status {
+  display: none;
+  padding: 8px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+
+.status.info {
+  background: #ddf4ff;
+  color: #0969da;
+  border: 1px solid #54aeff;
+}
+
+.status.success {
+  background: #dafbe1;
+  color: #1a7f37;
+  border: 1px solid #4ac26b;
+}
+
+.status.error {
+  background: #ffebe9;
+  color: #cf222e;
+  border: 1px solid #ff8182;
+}
+
+.setting-group {
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #d8dee4;
+}
+
+.setting-group label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #24292f;
+  margin-bottom: 4px;
+}
+
+.setting-group select {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 14px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #f6f8fa;
+  color: #24292f;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2357606a' d='M6 8.5L1.5 4h9L6 8.5z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 32px;
+}
+
+.setting-group select:focus {
+  outline: none;
+  border-color: #0969da;
+  background-color: #ffffff;
+  box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.1);
+}
+
+.setting-group select:hover {
+  background-color: #f3f4f6;
+}
+
+.setting-description {
+  font-size: 11px;
+  color: #57606a;
+  margin-top: 4px;
+}
+
+.help {
+  padding-top: 8px;
+  border-top: 1px solid #d8dee4;
+}
+
+.help a {
+  font-size: 12px;
+  color: #0969da;
+  text-decoration: none;
+}
+
+.help a:hover {
+  text-decoration: underline;
+}

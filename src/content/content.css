@@ -1,0 +1,82 @@
+/**
+ * GitHub PR HTML Preview - Content Styles
+ * Styling for the preview button to match GitHub's UI
+ */
+
+.gh-pr-html-preview-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  color: #ffffff;
+  background-color: #238636;
+  border: 1px solid rgba(27, 31, 36, 0.15);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.gh-pr-html-preview-btn:hover {
+  background-color: #2ea043;
+}
+
+.gh-pr-html-preview-btn:active {
+  background-color: #238636;
+}
+
+.gh-pr-html-preview-btn:focus {
+  outline: 2px solid #58a6ff;
+  outline-offset: -2px;
+}
+
+.gh-pr-html-preview-btn .octicon {
+  flex-shrink: 0;
+}
+
+.gh-pr-html-preview-btn span {
+  flex-shrink: 0;
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+  .gh-pr-html-preview-btn {
+    background-color: #238636;
+    border-color: rgba(205, 217, 229, 0.1);
+  }
+
+  .gh-pr-html-preview-btn:hover {
+    background-color: #2ea043;
+  }
+}
+
+/* GitHub's dark theme class support */
+[data-color-mode="dark"] .gh-pr-html-preview-btn,
+[data-dark-theme] .gh-pr-html-preview-btn,
+html[data-color-mode="dark"] .gh-pr-html-preview-btn {
+  background-color: #238636;
+  border-color: rgba(205, 217, 229, 0.1);
+}
+
+[data-color-mode="dark"] .gh-pr-html-preview-btn:hover,
+[data-dark-theme] .gh-pr-html-preview-btn:hover,
+html[data-color-mode="dark"] .gh-pr-html-preview-btn:hover {
+  background-color: #2ea043;
+}
+
+/* Hide on mobile - matching GitHub's responsive behavior */
+@media (max-width: 767px) {
+  .gh-pr-html-preview-btn span {
+    display: none;
+  }
+
+  .gh-pr-html-preview-btn {
+    padding: 4px 6px;
+  }
+}
