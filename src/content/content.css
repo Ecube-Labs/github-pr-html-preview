@@ -80,3 +80,58 @@ html[data-color-mode="dark"] .gh-pr-html-preview-btn:hover {
     padding: 4px 6px;
   }
 }
+
+/* Disabled state - when no token is set */
+.gh-pr-html-preview-btn:disabled {
+  background-color: #484f58;
+  color: #8b949e;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.gh-pr-html-preview-btn:disabled:hover {
+  background-color: #484f58;
+}
+
+/* Tooltip for disabled button */
+.gh-pr-html-preview-btn[data-no-token] {
+  position: relative;
+}
+
+.gh-pr-html-preview-btn[data-no-token]::after {
+  content: 'Set up GitHub token first';
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1f2328;
+  color: #e6edf3;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s, visibility 0.2s;
+  pointer-events: none;
+  z-index: 1000;
+}
+
+.gh-pr-html-preview-btn[data-no-token]::before {
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: #1f2328;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s, visibility 0.2s;
+}
+
+.gh-pr-html-preview-btn[data-no-token]:hover::after,
+.gh-pr-html-preview-btn[data-no-token]:hover::before {
+  opacity: 1;
+  visibility: visible;
+}

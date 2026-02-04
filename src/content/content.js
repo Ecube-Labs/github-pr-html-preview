@@ -11,6 +11,40 @@
   const TOAST_ID = 'gh-pr-html-preview-toast';
 
   /**
+   * Check if GitHub token exists in storage
+   */
+  async function checkTokenExists() {
+    const { githubToken } = await chrome.storage.local.get('githubToken');
+    return !!githubToken;
+  }
+
+  /**
+   * Update all preview buttons based on token availability
+   */
+  function updateAllButtonStates(hasToken) {
+    const buttons = document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}`);
+    buttons.forEach(btn => {
+      if (hasToken) {
+        btn.disabled = false;
+        btn.removeAttribute('data-no-token');
+        btn.title = btn.getAttribute('data-file-path') ? `Preview ${btn.getAttribute('data-file-path')}` : '';
+      } else {
+        btn.disabled = true;
+        btn.setAttribute('data-no-token', 'true');
+        btn.title = 'Set up GitHub token in extension settings';
+      }
+    });
+  }
+
+  // Listen for storage changes to update button states
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.githubToken) {
+      const hasToken = !!changes.githubToken.newValue;
+      updateAllButtonStates(hasToken);
+    }
+  });
+
+  /**
    * Check if current URL is a PR files or changes page
    */
   function isTargetPage() {
@@ -160,13 +194,21 @@
   /**
    * Create a preview button element
    */
-  function createPreviewButton(prInfo, filePath, ref, rawUrl) {
+  function createPreviewButton(prInfo, filePath, ref, rawUrl, hasToken) {
     const button = document.createElement('button');
     button.className = PREVIEW_BUTTON_CLASS;
     button.type = 'button';
-    button.title = `Preview ${filePath}`;
     button.setAttribute('data-file-path', filePath);
     button.setAttribute('data-raw-url', rawUrl);
+
+    // Set button state based on token availability
+    if (hasToken) {
+      button.title = `Preview ${filePath}`;
+    } else {
+      button.disabled = true;
+      button.setAttribute('data-no-token', 'true');
+      button.title = 'Set up GitHub token in extension settings';
+    }
 
     // Add eye icon (Octicon eye-16)
     const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -332,7 +374,7 @@
   /**
    * Add preview buttons to HTML file entries
    */
-  function addPreviewButtons() {
+  async function addPreviewButtons() {
     const prInfo = getPRInfo();
     if (!prInfo) return;
 
@@ -348,6 +390,9 @@
       return;
     }
 
+    // Check if token exists
+    const hasToken = await checkTokenExists();
+
     const htmlFiles = findHtmlFileEntries();
 
     htmlFiles.forEach(({ header, filePath }) => {
@@ -358,7 +403,7 @@
       const rawUrl = buildRawUrl(prInfo, filePath, ref);
 
       // Create and insert button (pass all params for API call)
-      const button = createPreviewButton(prInfo, filePath, ref, rawUrl);
+      const button = createPreviewButton(prInfo, filePath, ref, rawUrl, hasToken);
 
       // New GitHub UI: Find Viewed button's parent container (div.d-flex.flex-items-center.gap-2)
       const viewedBtn = header.querySelector('button[aria-label*="Viewed"]');

@@ -16,23 +16,55 @@
     </div>
 
     <h2>GitHub Token Settings</h2>
-    <p class="description">
-      A Personal Access Token is required to access private repositories.
-      Public repositories work without a token (with lower rate limits).
-    </p>
 
-    <div class="input-group">
-      <label for="token">GitHub Token:</label>
-      <input type="password" id="token" placeholder="ghp_xxxxxxxxxxxx">
+    <!-- Step 1: Create Token -->
+    <div class="step" id="step1">
+      <div class="step-header">
+        <span class="step-number">1</span>
+        <span class="step-title">Create a GitHub Token</span>
+        <span class="step-check">✓</span>
+      </div>
+      <div class="step-content">
+        <p class="step-description">Generate a Personal Access Token with <code>repo</code> scope for private repositories.</p>
+        <a href="https://github.com/settings/tokens/new?scopes=repo&description=GitHub%20PR%20HTML%20Preview"
+           target="_blank" class="btn-link" id="createTokenLink">
+          Open GitHub Settings →
+        </a>
+      </div>
     </div>
 
-    <div class="button-group">
-      <button id="saveBtn" class="primary">Save</button>
-      <button id="testBtn">Test Connection</button>
-      <button id="clearBtn" class="danger">Clear</button>
+    <div class="step-connector"></div>
+
+    <!-- Step 2: Paste & Save -->
+    <div class="step" id="step2">
+      <div class="step-header">
+        <span class="step-number">2</span>
+        <span class="step-title">Paste & Save Token</span>
+        <span class="step-check">✓</span>
+      </div>
+      <div class="step-content">
+        <div class="input-row">
+          <input type="password" id="token" placeholder="ghp_xxxxxxxxxxxx">
+          <button id="saveBtn" class="primary">Save</button>
+        </div>
+        <button id="clearBtn" class="danger clear-btn">Clear Token</button>
+      </div>
     </div>
 
-    <div id="status"></div>
+    <div class="step-connector"></div>
+
+    <!-- Step 3: Test Connection -->
+    <div class="step" id="step3">
+      <div class="step-header">
+        <span class="step-number">3</span>
+        <span class="step-title">Test Connection</span>
+        <span class="step-check">✓</span>
+      </div>
+      <div class="step-content">
+        <button id="testBtn" class="test-btn">Test Connection</button>
+        <div id="status"></div>
+      </div>
+    </div>
 
     <div class="setting-group">
       <label for="displayMode">Preview Display Mode</label>
@@ -41,12 +73,6 @@
         <option value="sidepanel">Side Panel (split view)</option>
       </select>
       <p class="setting-description">Side Panel shows preview alongside the PR page</p>
-    </div>
-
-    <div class="help">
-      <a href="https://github.com/settings/tokens/new?scopes=repo&description=GitHub%20PR%20HTML%20Preview" target="_blank">
-        Create a new token (repo scope required)
-      </a>
     </div>
   </div>
   <script src="popup.js"></script>

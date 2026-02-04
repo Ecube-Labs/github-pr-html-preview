@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GitHub PR HTML Preview",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Preview HTML files directly from GitHub PR changes",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "storage", "sidePanel"],
