@@ -346,13 +346,39 @@
       });
     });
 
-    // Legacy GitHub UI fallback: Find file headers in the diff view
-    const legacyHeaders = document.querySelectorAll('.file-header, [data-file-header]');
+    // Classic GitHub UI: Find file headers with data-path attribute (most reliable)
+    const classicHeaders = document.querySelectorAll('.file-header[data-path]');
+
+    classicHeaders.forEach(header => {
+      if (header.hasAttribute(PROCESSED_ATTR)) return;
+
+      // 1. Extract file path directly from data-path attribute (most reliable)
+      let filePath = header.getAttribute('data-path');
+
+      // 2. Fallback: Extract from Truncate-text link (avoid CODEOWNERS link)
+      if (!filePath) {
+        const filePathEl = header.querySelector('.file-info a.Link--primary.Truncate-text, .file-info .Truncate-text a');
+        if (filePathEl) {
+          filePath = filePathEl.getAttribute('title') || filePathEl.textContent.trim();
+        }
+      }
+
+      if (!filePath || !filePath.toLowerCase().endsWith('.html')) return;
+
+      fileEntries.push({
+        header: header,
+        filePath: filePath,
+        isClassicUI: true
+      });
+    });
+
+    // Legacy GitHub UI fallback: Find file headers without data-path attribute
+    const legacyHeaders = document.querySelectorAll('[data-file-header]:not(.file-header[data-path])');
 
     legacyHeaders.forEach(header => {
       if (header.hasAttribute(PROCESSED_ATTR)) return;
 
-      const filePathEl = header.querySelector('.file-info a, [data-path], .Link--primary');
+      const filePathEl = header.querySelector('.file-info a.Link--primary, [data-path], .Link--primary');
       if (!filePathEl) return;
 
       const filePath = filePathEl.getAttribute('title') ||
@@ -395,7 +421,7 @@
 
     const htmlFiles = findHtmlFileEntries();
 
-    htmlFiles.forEach(({ header, filePath }) => {
+    htmlFiles.forEach(({ header, filePath, isClassicUI }) => {
       // Mark as processed
       header.setAttribute(PROCESSED_ATTR, 'true');
 
@@ -428,6 +454,30 @@
             inserted = true;
           } else {
             rightActions.insertBefore(button, rightActions.firstChild);
+            inserted = true;
+          }
+        }
+      }
+
+      // Classic UI: Insert before Viewed checkbox in file-actions
+      if (!inserted && isClassicUI) {
+        const fileActions = header.querySelector('.file-actions .d-flex.flex-justify-end');
+        if (fileActions) {
+          const reviewToggle = fileActions.querySelector('.js-replace-file-header-review, .js-reviewed-toggle');
+          if (reviewToggle) {
+            // Insert before the Viewed checkbox container
+            fileActions.insertBefore(button, reviewToggle);
+            inserted = true;
+          } else {
+            // Insert at the beginning of file-actions
+            fileActions.insertBefore(button, fileActions.firstChild);
+            inserted = true;
+          }
+        } else {
+          // Fallback: just find .file-actions
+          const simpleFileActions = header.querySelector('.file-actions');
+          if (simpleFileActions) {
+            simpleFileActions.insertBefore(button, simpleFileActions.firstChild);
             inserted = true;
           }
         }
