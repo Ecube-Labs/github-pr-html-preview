@@ -43,9 +43,16 @@
   "background": {
     "service_worker": "src/background/service-worker.js"
   },
+  "sandbox": {
+    "pages": ["src/sandbox/renderer.html"]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';",
+    "sandbox": "sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads; script-src 'self' 'unsafe-inline' 'unsafe-eval' https: http: data: blob:; connect-src https: http: data: blob:; img-src * data: blob:; media-src * data: blob:; style-src 'self' 'unsafe-inline' https: http: data: blob:; font-src * data: blob:;"
+  },
   "web_accessible_resources": [
     {
-      "resources": ["src/preview/preview.html", "icons/*"],
+      "resources": ["src/preview/preview.html", "src/sandbox/renderer.html", "src/sandbox/renderer.js", "icons/*"],
       "matches": ["https://github.com/*"]
     }
   ],

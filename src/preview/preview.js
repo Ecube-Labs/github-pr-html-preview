@@ -23,6 +23,15 @@
   const previewContainer = document.getElementById('previewContainer');
   const loadingState = document.getElementById('loadingState');
 
+  function setLoadingState(visible, message) {
+    if (!loadingState || !loadingState.isConnected) return;
+    if (typeof message === 'string') {
+      const messageEl = document.getElementById('loadingMessage');
+      if (messageEl) messageEl.textContent = message;
+    }
+    loadingState.style.display = visible ? 'block' : 'none';
+  }
+
   /**
    * Show error state with optional action button and debug info
    */
@@ -45,6 +54,8 @@
         </div>
       `;
     }
+
+    setLoadingState(false);
 
     previewContainer.innerHTML = `
       <div class="error">
@@ -205,96 +216,378 @@
     });
   }
 
+  // Session-level cache for fetched external resources
+  const externalResourceCache = new Map();
+
   /**
-   * Process HTML to inline CSS, JS, and images fetched via GitHub API
-   * This avoids MIME type issues with raw.githubusercontent.com
+   * Fetch an external resource via the service worker proxy
+   * @param {string} url - The external URL to fetch
+   * @param {string} responseType - 'text' for CSS/JS, 'base64' for images/fonts
+   * @returns {Promise<{success: boolean, content?: string, mimeType?: string, error?: string}>}
+   */
+  async function fetchExternalResource(url, responseType = 'text') {
+    const cacheKey = `${responseType}:${url}`;
+    if (externalResourceCache.has(cacheKey)) {
+      return externalResourceCache.get(cacheKey);
+    }
+
+    const result = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({
+        action: 'fetchExternalResource',
+        url,
+        responseType
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ success: false, error: chrome.runtime.lastError.message });
+        } else {
+          resolve(response);
+        }
+      });
+    });
+
+    externalResourceCache.set(cacheKey, result);
+    return result;
+  }
+
+  /**
+   * Resolve a URL that may be relative to a base URL
+   * Handles protocol-relative URLs (//), absolute, and relative URLs
+   * @param {string} relativeUrl - URL to resolve
+   * @param {string} baseUrl - Base URL to resolve against
+   * @returns {string} - Fully resolved URL
+   */
+  function resolveExternalUrl(relativeUrl, baseUrl) {
+    if (!relativeUrl) return relativeUrl;
+    // Protocol-relative URL
+    if (relativeUrl.startsWith('//')) {
+      return 'https:' + relativeUrl;
+    }
+    // Already absolute
+    if (relativeUrl.startsWith('http://') || relativeUrl.startsWith('https://')) {
+      return relativeUrl;
+    }
+    // Data URLs - return as-is
+    if (relativeUrl.startsWith('data:')) {
+      return relativeUrl;
+    }
+    try {
+      return new URL(relativeUrl, baseUrl).href;
+    } catch {
+      return relativeUrl;
+    }
+  }
+
+  /**
+   * Escape special regex characters in a string
+   */
+  function escapeRegExp(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /**
+   * Process external CSS content: resolve @import rules and url() references
+   * @param {string} cssContent - The CSS text content
+   * @param {string} cssUrl - The URL the CSS was fetched from (for relative URL resolution)
+   * @param {Set} visited - Set of already-visited URLs (circular reference detection)
+   * @returns {Promise<string>} - Processed CSS content
+   */
+  async function processExternalCssContent(cssContent, cssUrl, visited = new Set()) {
+    if (visited.has(cssUrl)) {
+      console.warn(`[GitHub PR Preview] Circular @import detected: ${cssUrl}`);
+      return cssContent;
+    }
+    visited.add(cssUrl);
+
+    // Remove sourceMappingURL comments
+    cssContent = cssContent.replace(/\/\*#\s*sourceMappingURL=.*?\*\//g, '');
+    cssContent = cssContent.replace(/\/\/#\s*sourceMappingURL=.*/g, '');
+
+    // Process @import rules
+    const importRegex = /@import\s+(?:url\(\s*['"]?([^'")]+)['"]?\s*\)|['"]([^'"]+)['"]);?/g;
+    let importMatch;
+    const importReplacements = [];
+
+    while ((importMatch = importRegex.exec(cssContent)) !== null) {
+      const importUrl = importMatch[1] || importMatch[2];
+      if (!importUrl) continue;
+      const resolvedUrl = resolveExternalUrl(importUrl, cssUrl);
+      importReplacements.push({
+        fullMatch: importMatch[0],
+        resolvedUrl
+      });
+    }
+
+    // Fetch all @import CSS in parallel
+    if (importReplacements.length > 0) {
+      const importResults = await Promise.allSettled(
+        importReplacements.map(async ({ resolvedUrl }) => {
+          const result = await fetchExternalResource(resolvedUrl, 'text');
+          if (result.success) {
+            return processExternalCssContent(result.content, resolvedUrl, new Set(visited));
+          }
+          return `/* Failed to load @import: ${resolvedUrl} */`;
+        })
+      );
+
+      for (let i = importReplacements.length - 1; i >= 0; i--) {
+        const replacement = importReplacements[i];
+        const result = importResults[i];
+        const inlinedCss = result.status === 'fulfilled' ? result.value : `/* Failed to load @import: ${replacement.resolvedUrl} */`;
+        cssContent = cssContent.replace(replacement.fullMatch, inlinedCss);
+      }
+    }
+
+    // Process url() references (fonts, background images, etc.)
+    const urlRegex = /url\(\s*['"]?(?!data:)([^'")]+?)['"]?\s*\)/g;
+    let urlMatch;
+    const urlReplacements = [];
+
+    while ((urlMatch = urlRegex.exec(cssContent)) !== null) {
+      const resourceUrl = urlMatch[1];
+      if (!resourceUrl || resourceUrl.startsWith('#')) continue;
+      const resolvedUrl = resolveExternalUrl(resourceUrl, cssUrl);
+      if (!resolvedUrl.startsWith('http://') && !resolvedUrl.startsWith('https://')) continue;
+      urlReplacements.push({
+        original: urlMatch[0],
+        resourceUrl,
+        resolvedUrl
+      });
+    }
+
+    // Fetch all url() resources in parallel as base64
+    if (urlReplacements.length > 0) {
+      const urlResults = await Promise.allSettled(
+        urlReplacements.map(({ resolvedUrl }) => fetchExternalResource(resolvedUrl, 'base64'))
+      );
+
+      // Replace in reverse to preserve positions
+      const uniqueReplacements = new Map();
+      for (let i = 0; i < urlReplacements.length; i++) {
+        const { original, resolvedUrl } = urlReplacements[i];
+        const result = urlResults[i];
+        if (result.status === 'fulfilled' && result.value.success) {
+          const dataUrl = `data:${result.value.mimeType};base64,${result.value.content}`;
+          uniqueReplacements.set(original, `url("${dataUrl}")`);
+        } else {
+          // Fallback: use absolute URL instead of relative
+          uniqueReplacements.set(original, `url("${resolvedUrl}")`);
+        }
+      }
+
+      for (const [original, replacement] of uniqueReplacements) {
+        const escaped = escapeRegExp(original);
+        cssContent = cssContent.replace(new RegExp(escaped, 'g'), replacement);
+      }
+    }
+
+    return cssContent;
+  }
+
+  /**
+   * Update loading state with progress information
+   */
+  function updateLoadingProgress(loaded, total) {
+    setLoadingState(true, `Loading external resources... (${loaded}/${total})`);
+  }
+
+  /**
+   * Detect <base href="..."> tag and return its href if present
+   */
+  function detectBaseHref(html) {
+    const baseMatch = html.match(/<base\s+[^>]*href=["']([^"']+)["'][^>]*>/i);
+    return baseMatch ? baseMatch[1] : null;
+  }
+
+  /**
+   * Check if a URL is external (http/https/protocol-relative)
+   */
+  function isExternalUrl(url) {
+    return url.startsWith('http://') || url.startsWith('https://') || url.startsWith('//');
+  }
+
+  /**
+   * Normalize a URL: convert protocol-relative to https
+   */
+  function normalizeExternalUrl(url) {
+    if (url.startsWith('//')) return 'https:' + url;
+    return url;
+  }
+
+  /**
+   * Process HTML to inline CSS, JS, and images fetched via GitHub API or external CDN
+   * Handles both repo-local assets (via GitHub API) and external CDN resources (via service worker proxy)
    */
   async function processHtmlAssets(html) {
-    // Process CSS: <link rel="stylesheet" href="...">
+    // Detect <base href> for URL resolution
+    const baseHref = detectBaseHref(html);
+
+    // Remove <link rel="preload/prefetch"> tags (all resources will be inlined)
+    html = html.replace(/<link\s+[^>]*rel=["'](?:preload|prefetch|dns-prefetch|preconnect)["'][^>]*>/gi, '');
+
+    // ── Phase 1: Collect all resource references ──
+
+    const cssEntries = [];    // { linkTag, href, isExternal }
+    const scriptEntries = []; // { fullTag, src, isExternal, typeAttr }
+    const imgEntries = [];    // { fullTag, src, isExternal }
+
+    // Collect CSS links
     const cssLinkRegex = /<link\s+[^>]*rel=["']stylesheet["'][^>]*>/gi;
     const cssLinks = html.match(cssLinkRegex) || [];
-
     for (const linkTag of cssLinks) {
       const hrefMatch = linkTag.match(/href=["']([^"']+)["']/i);
       if (!hrefMatch) continue;
-
       const href = hrefMatch[1];
-      // Skip external URLs
-      if (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('//') || href.startsWith('data:')) {
-        continue;
-      }
-
-      try {
-        const cssContent = await fetchAsset(href);
-        // Replace link tag with inline style tag
-        const styleTag = `<style>/* Inlined from: ${href} */\n${cssContent}</style>`;
-        html = html.replace(linkTag, styleTag);
-        console.log(`[GitHub PR Preview] Inlined CSS: ${href}`);
-      } catch (e) {
-        console.warn(`[GitHub PR Preview] Failed to fetch CSS: ${href}`, e);
-        // Keep original link tag (will fail but at least won't break completely)
-      }
+      if (href.startsWith('data:')) continue;
+      cssEntries.push({ linkTag, href, isExternal: isExternalUrl(href) });
     }
 
-    // Process JS: <script src="...">
+    // Collect script tags
     const scriptRegex = /<script\s+[^>]*src=["']([^"']+)["'][^>]*><\/script>/gi;
     let scriptMatch;
-    const scriptReplacements = [];
-
-    // Reset regex
-    scriptRegex.lastIndex = 0;
     while ((scriptMatch = scriptRegex.exec(html)) !== null) {
       const fullTag = scriptMatch[0];
       const src = scriptMatch[1];
-
-      // Skip external URLs
-      if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('//') || src.startsWith('data:')) {
-        continue;
-      }
-
-      scriptReplacements.push({ fullTag, src });
+      if (src.startsWith('data:')) continue;
+      // Extract type attribute if present
+      const typeMatch = fullTag.match(/type=["']([^"']+)["']/i);
+      const typeAttr = typeMatch ? typeMatch[1] : null;
+      scriptEntries.push({ fullTag, src, isExternal: isExternalUrl(src), typeAttr });
     }
 
-    for (const { fullTag, src } of scriptReplacements) {
-      try {
-        const jsContent = await fetchAsset(src);
-        // Replace script tag with inline script
-        const inlineScript = `<script>/* Inlined from: ${src} */\n${jsContent}</script>`;
-        html = html.replace(fullTag, inlineScript);
-        console.log(`[GitHub PR Preview] Inlined JS: ${src}`);
-      } catch (e) {
-        console.warn(`[GitHub PR Preview] Failed to fetch JS: ${src}`, e);
-      }
-    }
-
-    // Process images: <img src="...">
+    // Collect image tags
     const imgRegex = /<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi;
     let imgMatch;
-    const imgReplacements = [];
-
-    imgRegex.lastIndex = 0;
     while ((imgMatch = imgRegex.exec(html)) !== null) {
       const fullTag = imgMatch[0];
       const src = imgMatch[1];
-
-      // Skip external URLs and data URLs
-      if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('//') || src.startsWith('data:')) {
-        continue;
-      }
-
-      imgReplacements.push({ fullTag, src });
+      if (src.startsWith('data:')) continue;
+      imgEntries.push({ fullTag, src, isExternal: isExternalUrl(src) });
     }
 
-    for (const { fullTag, src } of imgReplacements) {
-      try {
-        const dataUrl = await fetchImageAsDataUrl(src);
-        // Replace src with data URL
-        const newTag = fullTag.replace(src, dataUrl);
-        html = html.replace(fullTag, newTag);
-        console.log(`[GitHub PR Preview] Converted image to data URL: ${src}`);
-      } catch (e) {
-        console.warn(`[GitHub PR Preview] Failed to fetch image: ${src}`, e);
-        // Keep original src (will try to load from raw URL later via rewriteImageUrls)
+    const totalResources = cssEntries.length + scriptEntries.length + imgEntries.length;
+    if (totalResources === 0) return html;
+
+    let loadedCount = 0;
+    updateLoadingProgress(loadedCount, totalResources);
+
+    // ── Phase 2: Fetch all resources in parallel ──
+
+    const cssResults = await Promise.allSettled(
+      cssEntries.map(async (entry) => {
+        try {
+          let cssContent;
+          if (entry.isExternal) {
+            const url = normalizeExternalUrl(entry.href);
+            const result = await fetchExternalResource(url, 'text');
+            if (!result.success) throw new Error(result.error);
+            cssContent = await processExternalCssContent(result.content, url);
+          } else {
+            cssContent = await fetchAsset(entry.href);
+          }
+          return { success: true, content: cssContent };
+        } catch (e) {
+          console.warn(`[GitHub PR Preview] Failed to fetch CSS: ${entry.href}`, e);
+          return { success: false, error: e.message, href: entry.href };
+        } finally {
+          loadedCount++;
+          updateLoadingProgress(loadedCount, totalResources);
+        }
+      })
+    );
+
+    const scriptResults = await Promise.allSettled(
+      scriptEntries.map(async (entry) => {
+        try {
+          let jsContent;
+          if (entry.isExternal) {
+            const url = normalizeExternalUrl(entry.src);
+            const result = await fetchExternalResource(url, 'text');
+            if (!result.success) throw new Error(result.error);
+            jsContent = result.content;
+          } else {
+            jsContent = await fetchAsset(entry.src);
+          }
+          // Remove sourceMappingURL
+          jsContent = jsContent.replace(/\/\/[#@]\s*sourceMappingURL=.*/g, '');
+          return { success: true, content: jsContent };
+        } catch (e) {
+          console.warn(`[GitHub PR Preview] Failed to fetch JS: ${entry.src}`, e);
+          return { success: false, error: e.message, src: entry.src };
+        } finally {
+          loadedCount++;
+          updateLoadingProgress(loadedCount, totalResources);
+        }
+      })
+    );
+
+    const imgResults = await Promise.allSettled(
+      imgEntries.map(async (entry) => {
+        try {
+          let dataUrl;
+          if (entry.isExternal) {
+            const url = normalizeExternalUrl(entry.src);
+            const result = await fetchExternalResource(url, 'base64');
+            if (!result.success) throw new Error(result.error);
+            dataUrl = `data:${result.mimeType};base64,${result.content}`;
+          } else {
+            dataUrl = await fetchImageAsDataUrl(entry.src);
+          }
+          return { success: true, dataUrl };
+        } catch (e) {
+          console.warn(`[GitHub PR Preview] Failed to fetch image: ${entry.src}`, e);
+          return { success: false, error: e.message, src: entry.src };
+        } finally {
+          loadedCount++;
+          updateLoadingProgress(loadedCount, totalResources);
+        }
+      })
+    );
+
+    // ── Phase 3: Apply replacements ──
+
+    // Replace CSS links with inline styles
+    for (let i = 0; i < cssEntries.length; i++) {
+      const entry = cssEntries[i];
+      const result = cssResults[i];
+      if (result.status === 'fulfilled' && result.value.success) {
+        const styleTag = `<style>/* Inlined from: ${entry.href} */\n${result.value.content}</style>`;
+        html = html.replace(entry.linkTag, styleTag);
+        console.log(`[GitHub PR Preview] Inlined CSS: ${entry.href}`);
+      } else {
+        const errorMsg = result.status === 'fulfilled' ? result.value.error : result.reason?.message;
+        html = html.replace(entry.linkTag, `<!-- Failed to load CSS: ${entry.href} (${errorMsg}) -->`);
+      }
+    }
+
+    // Replace script tags with inline scripts
+    for (let i = 0; i < scriptEntries.length; i++) {
+      const entry = scriptEntries[i];
+      const result = scriptResults[i];
+      if (result.status === 'fulfilled' && result.value.success) {
+        // Build inline script tag, preserving type attribute (e.g., type="module")
+        const typeStr = entry.typeAttr ? ` type="${entry.typeAttr}"` : '';
+        const inlineScript = `<script${typeStr}>/* Inlined from: ${entry.src} */\n${result.value.content}<\/script>`;
+        html = html.replace(entry.fullTag, inlineScript);
+        console.log(`[GitHub PR Preview] Inlined JS: ${entry.src}`);
+      } else {
+        const errorMsg = result.status === 'fulfilled' ? result.value.error : result.reason?.message;
+        html = html.replace(entry.fullTag, `<!-- Failed to load JS: ${entry.src} (${errorMsg}) -->`);
+      }
+    }
+
+    // Replace image tags with data URLs
+    for (let i = 0; i < imgEntries.length; i++) {
+      const entry = imgEntries[i];
+      const result = imgResults[i];
+      if (result.status === 'fulfilled' && result.value.success) {
+        const newTag = entry.fullTag.replace(entry.src, result.value.dataUrl);
+        html = html.replace(entry.fullTag, newTag);
+        console.log(`[GitHub PR Preview] Converted image to data URL: ${entry.src}`);
+      } else {
+        // Keep original tag for non-external images (rewriteImageUrls may fix them)
+        if (entry.isExternal) {
+          console.warn(`[GitHub PR Preview] Failed to inline external image: ${entry.src}`);
+        }
       }
     }
 
@@ -302,25 +595,362 @@
   }
 
   /**
-   * Create iframe with HTML content
+   * Build a proxy script that intercepts dynamic resource loading inside the iframe.
+   * Overrides document.createElement, window.fetch, and XMLHttpRequest to proxy
+   * external resource requests via postMessage to the parent (preview.js).
    */
-  function createPreviewIframe(htmlContent) {
-    const iframe = document.createElement('iframe');
-    iframe.className = 'preview-iframe';
-    iframe.sandbox = 'allow-scripts allow-same-origin';
+  function buildProxyScript() {
+    return `
+(function() {
+  'use strict';
+  var PROXY_TIMEOUT = 30000;
+  var pendingRequests = {};
+  var requestCounter = 0;
 
-    // Clear container and add iframe
-    previewContainer.innerHTML = '';
-    previewContainer.appendChild(iframe);
+  function generateId() {
+    return '__proxy_' + (++requestCounter) + '_' + Date.now();
+  }
 
-    // Write content to iframe
-    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-    iframeDoc.open();
-    iframeDoc.write(htmlContent);
-    iframeDoc.close();
+  function isExternalUrl(url) {
+    return /^(https?:)?\\/\\//.test(url);
+  }
 
-    // Attach navigation handler directly to iframe document (CSP-safe approach)
-    attachNavigationHandler(iframeDoc);
+  function normalizeUrl(url) {
+    if (url.startsWith('//')) return 'https:' + url;
+    return url;
+  }
+
+  function proxyFetch(url, responseType) {
+    return new Promise(function(resolve, reject) {
+      var id = generateId();
+      var timer = setTimeout(function() {
+        delete pendingRequests[id];
+        reject(new Error('Proxy timeout for ' + url));
+      }, PROXY_TIMEOUT);
+
+      pendingRequests[id] = function(response) {
+        clearTimeout(timer);
+        delete pendingRequests[id];
+        if (response.success) {
+          resolve(response);
+        } else {
+          reject(new Error(response.error || 'Proxy fetch failed'));
+        }
+      };
+
+      window.parent.postMessage({
+        type: '__ghPreviewProxy',
+        id: id,
+        url: normalizeUrl(url),
+        responseType: responseType
+      }, '*');
+    });
+  }
+
+  // Listen for proxy responses from parent
+  window.addEventListener('message', function(event) {
+    var data = event.data;
+    if (data && data.type === '__ghPreviewProxyResponse' && pendingRequests[data.id]) {
+      pendingRequests[data.id](data);
+    }
+  });
+
+  // Override document.createElement to intercept script/link creation
+  var origCreateElement = document.createElement.bind(document);
+  document.createElement = function(tagName) {
+    var el = origCreateElement(tagName);
+    var tag = tagName.toLowerCase();
+
+    if (tag === 'script') {
+      var origSrcDescriptor = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src') ||
+                               Object.getOwnPropertyDescriptor(el.__proto__, 'src');
+      Object.defineProperty(el, 'src', {
+        get: function() { return el.getAttribute('src') || ''; },
+        set: function(val) {
+          if (isExternalUrl(val)) {
+            proxyFetch(val, 'text').then(function(res) {
+              el.removeAttribute('src');
+              el.textContent = res.content;
+              // Dispatch load event
+              el.dispatchEvent(new Event('load'));
+            }).catch(function(err) {
+              console.warn('[GH Preview Proxy] Failed to proxy script:', val, err);
+              el.dispatchEvent(new Event('error'));
+            });
+          } else {
+            el.setAttribute('src', val);
+          }
+        },
+        configurable: true
+      });
+    }
+
+    if (tag === 'link') {
+      var origSetAttribute = el.setAttribute.bind(el);
+      el.setAttribute = function(name, value) {
+        origSetAttribute(name, value);
+        if (name === 'href' && el.getAttribute('rel') === 'stylesheet' && isExternalUrl(value)) {
+          proxyFetch(value, 'text').then(function(res) {
+            var style = origCreateElement('style');
+            style.textContent = res.content;
+            if (el.parentNode) {
+              el.parentNode.replaceChild(style, el);
+            }
+          }).catch(function(err) {
+            console.warn('[GH Preview Proxy] Failed to proxy CSS:', value, err);
+          });
+        }
+      };
+    }
+
+    return el;
+  };
+
+  // Override window.fetch for external URLs
+  var origFetch = window.fetch;
+  window.fetch = function(input, init) {
+    var url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+    if (isExternalUrl(url)) {
+      return proxyFetch(url, 'text').then(function(res) {
+        return new Response(res.content, {
+          status: 200,
+          statusText: 'OK',
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      });
+    }
+    return origFetch.call(window, input, init);
+  };
+
+  // Override XMLHttpRequest for external URLs
+  var OrigXHR = window.XMLHttpRequest;
+  function ProxyXHR() {
+    var xhr = new OrigXHR();
+    var _url = '';
+    var _isExternal = false;
+    var _onreadystatechange = null;
+    var _onload = null;
+    var _onerror = null;
+
+    var proxy = Object.create(OrigXHR.prototype);
+
+    proxy.open = function(method, url) {
+      _url = url;
+      _isExternal = isExternalUrl(url);
+      if (!_isExternal) {
+        xhr.open.apply(xhr, arguments);
+      }
+    };
+
+    proxy.send = function(body) {
+      if (_isExternal) {
+        proxyFetch(_url, 'text').then(function(res) {
+          Object.defineProperties(proxy, {
+            readyState: { value: 4, writable: false, configurable: true },
+            status: { value: 200, writable: false, configurable: true },
+            statusText: { value: 'OK', writable: false, configurable: true },
+            responseText: { value: res.content, writable: false, configurable: true },
+            response: { value: res.content, writable: false, configurable: true }
+          });
+          if (_onreadystatechange) _onreadystatechange.call(proxy);
+          if (_onload) _onload.call(proxy);
+        }).catch(function(err) {
+          Object.defineProperties(proxy, {
+            readyState: { value: 4, writable: false, configurable: true },
+            status: { value: 0, writable: false, configurable: true },
+            statusText: { value: '', writable: false, configurable: true }
+          });
+          if (_onreadystatechange) _onreadystatechange.call(proxy);
+          if (_onerror) _onerror.call(proxy);
+        });
+      } else {
+        xhr.send.apply(xhr, arguments);
+      }
+    };
+
+    proxy.setRequestHeader = function() {
+      if (!_isExternal) xhr.setRequestHeader.apply(xhr, arguments);
+    };
+    proxy.getResponseHeader = function(h) {
+      return _isExternal ? null : xhr.getResponseHeader(h);
+    };
+    proxy.getAllResponseHeaders = function() {
+      return _isExternal ? '' : xhr.getAllResponseHeaders();
+    };
+    proxy.abort = function() {
+      if (!_isExternal) xhr.abort();
+    };
+
+    Object.defineProperty(proxy, 'onreadystatechange', {
+      get: function() { return _isExternal ? _onreadystatechange : xhr.onreadystatechange; },
+      set: function(v) { if (_isExternal) _onreadystatechange = v; else xhr.onreadystatechange = v; }
+    });
+    Object.defineProperty(proxy, 'onload', {
+      get: function() { return _isExternal ? _onload : xhr.onload; },
+      set: function(v) { if (_isExternal) _onload = v; else xhr.onload = v; }
+    });
+    Object.defineProperty(proxy, 'onerror', {
+      get: function() { return _isExternal ? _onerror : xhr.onerror; },
+      set: function(v) { if (_isExternal) _onerror = v; else xhr.onerror = v; }
+    });
+
+    return proxy;
+  }
+  window.XMLHttpRequest = ProxyXHR;
+
+  // Navigation interceptor: capture clicks on internal HTML links
+  document.addEventListener('click', function(e) {
+    var link = e.target.closest ? e.target.closest('a[href]') : null;
+    if (!link) return;
+    var href = link.getAttribute('href');
+    if (!href || /^(https?:|\\/\\/|#|javascript:|mailto:|tel:)/.test(href)) return;
+    if (/\\.html?(#|$)/.test(href)) {
+      e.preventDefault();
+      e.stopPropagation();
+      window.parent.postMessage({
+        type: '__ghPreviewNavigation',
+        href: href
+      }, '*');
+    }
+  }, true);
+
+  // Hash scroll listener: parent sends scroll-to-hash requests via postMessage
+  window.addEventListener('message', function(event) {
+    if (event.data && event.data.type === '__ghPreviewScrollToHash') {
+      var target = document.querySelector(event.data.hash);
+      if (target) target.scrollIntoView();
+    }
+  });
+})();
+`;
+  }
+
+  /**
+   * Inject the proxy script into HTML content, right after <head> or at the start of <body>
+   */
+  function injectProxyScript(html) {
+    const proxyScript = `<script>${buildProxyScript()}<\/script>`;
+    // Try to inject after <head>
+    const headMatch = html.match(/<head[^>]*>/i);
+    if (headMatch) {
+      const insertPos = headMatch.index + headMatch[0].length;
+      return html.slice(0, insertPos) + proxyScript + html.slice(insertPos);
+    }
+    // Fallback: inject after <html> or at the start
+    const htmlMatch = html.match(/<html[^>]*>/i);
+    if (htmlMatch) {
+      const insertPos = htmlMatch.index + htmlMatch[0].length;
+      return html.slice(0, insertPos) + proxyScript + html.slice(insertPos);
+    }
+    // Last resort: prepend
+    return proxyScript + html;
+  }
+
+  /**
+   * Host <-> sandbox renderer bridge
+   */
+  let sandboxFrame = null;
+  let sandboxReady = false;
+  let pendingRenderPayload = null;
+  let sandboxMessageListenerSetup = false;
+
+  function ensureSandboxFrame() {
+    if (sandboxFrame?.isConnected) return sandboxFrame;
+    const existingFrame = previewContainer.querySelector('.preview-iframe');
+    if (existingFrame) {
+      sandboxFrame = existingFrame;
+      return sandboxFrame;
+    }
+
+    sandboxFrame = document.createElement('iframe');
+    sandboxFrame.className = 'preview-iframe';
+    sandboxFrame.sandbox = 'allow-scripts';
+    sandboxFrame.src = chrome.runtime.getURL('src/sandbox/renderer.html');
+    sandboxReady = false;
+
+    if (loadingState?.isConnected) {
+      previewContainer.insertBefore(sandboxFrame, loadingState);
+    } else {
+      previewContainer.appendChild(sandboxFrame);
+    }
+    return sandboxFrame;
+  }
+
+  function sendRenderToSandbox(payload) {
+    if (!sandboxFrame?.contentWindow) return;
+    sandboxFrame.contentWindow.postMessage({
+      type: 'host-render',
+      htmlContent: payload.htmlContent,
+      scrollToHash: payload.scrollToHash || null
+    }, '*');
+  }
+
+  function setupSandboxMessageListener() {
+    if (sandboxMessageListenerSetup) return;
+    sandboxMessageListenerSetup = true;
+
+    window.addEventListener('message', async (event) => {
+      if (!sandboxFrame || event.source !== sandboxFrame.contentWindow) return;
+      const data = event.data;
+      if (!data || typeof data !== 'object') return;
+
+      if (data.type === 'renderer-ready') {
+        sandboxReady = true;
+        if (pendingRenderPayload) {
+          sendRenderToSandbox(pendingRenderPayload);
+        }
+        return;
+      }
+
+      if (data.type === 'renderer-render-start') {
+        setLoadingState(true, 'Running page scripts...');
+        return;
+      }
+
+      if (data.type === 'renderer-render-complete') {
+        setLoadingState(false);
+        return;
+      }
+
+      if (data.type === 'renderer-fetch-external') {
+        const result = await fetchExternalResource(data.url, data.responseType || 'text');
+        sandboxFrame.contentWindow.postMessage({
+          type: 'host-fetch-response',
+          id: data.id,
+          success: result.success,
+          content: result.content,
+          mimeType: result.mimeType,
+          error: result.error
+        }, '*');
+        return;
+      }
+
+      if (data.type === 'renderer-navigate' && data.href) {
+        await handleNavigation(data.href);
+      }
+    });
+  }
+
+  /**
+   * Render HTML through sandbox runtime
+   * @param {string} htmlContent - Processed HTML to render
+   * @param {string} [scrollToHash] - Optional hash (e.g., "#section") to scroll to after load
+   */
+  function createPreviewIframe(htmlContent, scrollToHash) {
+    htmlContent = injectProxyScript(htmlContent);
+
+    ensureSandboxFrame();
+    setupSandboxMessageListener();
+
+    pendingRenderPayload = {
+      htmlContent,
+      scrollToHash: scrollToHash || null
+    };
+    setLoadingState(true, 'Preparing preview...');
+
+    if (sandboxReady) {
+      sendRenderToSandbox(pendingRenderPayload);
+    }
 
     // Update document title
     const titleMatch = htmlContent.match(/<title[^>]*>([^<]+)<\/title>/i);
@@ -412,35 +1042,6 @@
   }
 
   /**
-   * Attach navigation handler directly to iframe document
-   * This avoids CSP issues with inline script injection
-   * @param {Document} doc - The iframe's document object
-   */
-  function attachNavigationHandler(doc) {
-    doc.addEventListener('click', async function(e) {
-      const link = e.target.closest('a[href]');
-      if (!link) return;
-
-      const href = link.getAttribute('href');
-
-      // Skip external URLs, anchors, javascript:, mailto:, tel: links
-      if (!href || href.startsWith('http://') || href.startsWith('https://') ||
-          href.startsWith('//') || href.startsWith('#') || href.startsWith('javascript:') ||
-          href.startsWith('mailto:') || href.startsWith('tel:')) {
-        return;
-      }
-
-      // Intercept HTML file links
-      if (href.endsWith('.html') || href.endsWith('.htm') ||
-          href.includes('.html#') || href.includes('.htm#')) {
-        e.preventDefault();
-        e.stopPropagation();
-        await handleNavigation(href);
-      }
-    }, true);
-  }
-
-  /**
    * Fetch content for a specific path via GitHub API
    * @param {string} targetPath - Path to fetch
    * @returns {Promise<string>} - File content
@@ -471,10 +1072,11 @@
   /**
    * Load and display preview for a specific path
    * @param {string} targetPath - Path to load
+   * @param {string} [scrollToHash] - Optional hash to scroll to after load
    */
-  async function loadPreviewForPath(targetPath) {
+  async function loadPreviewForPath(targetPath, scrollToHash) {
     try {
-      loadingState.style.display = 'flex';
+      setLoadingState(true, 'Loading preview...');
 
       // Update current path
       currentPath = targetPath;
@@ -496,7 +1098,7 @@
       // Rewrite image URLs
       htmlContent = rewriteImageUrls(htmlContent, newRawUrl);
 
-      createPreviewIframe(htmlContent);
+      createPreviewIframe(htmlContent, scrollToHash);
     } catch (error) {
       console.error('[GitHub PR Preview] Failed to load preview:', error);
       const showSettings = isTokenError(error.errorCode);
@@ -530,19 +1132,8 @@
     newUrl.searchParams.set('file', newPath);
     window.history.pushState({ path: newPath }, '', newUrl);
 
-    // Load the new HTML file
-    await loadPreviewForPath(newPath);
-
-    // If there's a hash, scroll to it after load
-    if (hashPart) {
-      const iframe = previewContainer.querySelector('iframe');
-      if (iframe && iframe.contentDocument) {
-        const target = iframe.contentDocument.querySelector(hashPart);
-        if (target) {
-          target.scrollIntoView();
-        }
-      }
-    }
+    // Load the new HTML file, passing hash for post-load scrolling
+    await loadPreviewForPath(newPath, hashPart || undefined);
   }
 
   /**
@@ -560,7 +1151,7 @@
     document.title = `Preview: ${filePath || 'HTML File'}`;
 
     try {
-      loadingState.style.display = 'flex';
+      setLoadingState(true, 'Loading preview...');
 
       // Fetch via GitHub API
       let htmlContent = await fetchViaGitHubAPI();

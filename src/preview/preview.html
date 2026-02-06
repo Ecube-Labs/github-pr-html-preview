@@ -77,38 +77,62 @@
 
     .preview-container {
       flex: 1;
-      display: flex;
-      flex-direction: column;
+      position: relative;
+      min-height: 0;
     }
 
     .preview-iframe {
-      flex: 1;
+      position: absolute;
+      inset: 0;
       width: 100%;
+      height: 100%;
       border: none;
       background-color: #ffffff;
+      z-index: 1;
     }
 
     .loading {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      display: none;
+      overflow: hidden;
+      background: rgba(9, 105, 218, 0.2);
+      z-index: 3;
+    }
+
+    .loading-line {
+      width: 35%;
       height: 100%;
-      color: #57606a;
+      background: #0969da;
+      box-shadow: 0 0 8px rgba(9, 105, 218, 0.6);
+      animation: loading-line-move 1.1s ease-in-out infinite;
     }
 
-    .loading-spinner {
-      width: 32px;
-      height: 32px;
-      border: 3px solid #d0d7de;
-      border-top-color: #0969da;
-      border-radius: 50%;
-      animation: spin 1s linear infinite;
-      margin-bottom: 16px;
+    @keyframes loading-line-move {
+      0% {
+        transform: translateX(-110%);
+      }
+      50% {
+        transform: translateX(105%);
+      }
+      100% {
+        transform: translateX(260%);
+      }
     }
 
-    @keyframes spin {
-      to { transform: rotate(360deg); }
+    .loading-message {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
     }
 
     .error {
@@ -256,8 +280,8 @@
 
   <div class="preview-container" id="previewContainer">
     <div class="loading" id="loadingState">
-      <div class="loading-spinner"></div>
-      <div>Loading preview...</div>
+      <div class="loading-line"></div>
+      <div class="loading-message" id="loadingMessage">Loading preview...</div>
     </div>
   </div>
 

@@ -9,6 +9,45 @@
   const PREVIEW_BUTTON_CLASS = 'gh-pr-html-preview-btn';
   const PROCESSED_ATTR = 'data-html-preview-processed';
   const TOAST_ID = 'gh-pr-html-preview-toast';
+  let extensionContextInvalidToastShown = false;
+
+  /**
+   * Send a runtime message and gracefully handle extension reload/update races
+   * where the current content script context has been invalidated.
+   */
+  function sendMessageSafe(message, callback) {
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (!chrome.runtime) return;
+        const err = chrome.runtime.lastError;
+        if (err) {
+          const msg = err.message || '';
+          if (msg.includes('Extension context invalidated')) {
+            if (!extensionContextInvalidToastShown) {
+              extensionContextInvalidToastShown = true;
+              showToast('Extension was updated. Refresh this GitHub page and try again.', 5000);
+            }
+            return;
+          }
+          console.warn('[GitHub PR Preview] sendMessage error:', msg);
+          return;
+        }
+        if (typeof callback === 'function') {
+          callback(response);
+        }
+      });
+    } catch (error) {
+      const msg = error?.message || String(error);
+      if (msg.includes('Extension context invalidated')) {
+        if (!extensionContextInvalidToastShown) {
+          extensionContextInvalidToastShown = true;
+          showToast('Extension was updated. Refresh this GitHub page and try again.', 5000);
+        }
+        return;
+      }
+      console.warn('[GitHub PR Preview] sendMessage exception:', error);
+    }
+  }
 
   /**
    * Check if GitHub token exists in storage
@@ -310,7 +349,7 @@
 
     // Send message to background script to open preview
     // Pass all parameters separately to avoid URL parsing issues with branch names containing slashes
-    chrome.runtime.sendMessage({
+    sendMessageSafe({
       action: 'openPreview',
       owner: prInfo.owner,
       repo: prInfo.repo,
@@ -586,11 +625,11 @@
    */
   function syncColorScheme() {
     const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    chrome.runtime.sendMessage({ action: 'updateColorScheme', isDark });
+    sendMessageSafe({ action: 'updateColorScheme', isDark });
 
     // Listen for changes
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
-      chrome.runtime.sendMessage({ action: 'updateColorScheme', isDark: e.matches });
+      sendMessageSafe({ action: 'updateColorScheme', isDark: e.matches });
     });
   }
 

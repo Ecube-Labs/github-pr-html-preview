@@ -160,6 +160,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // Fetch external resource (CSS/JS/images from CDN etc.)
+  if (message.action === 'fetchExternalResource') {
+    fetchExternalResource(message.url, message.responseType || 'text')
+      .then(sendResponse);
+    return true;
+  }
+
   // Clear pending preview badge
   if (message.action === 'clearPendingPreview') {
     chrome.storage.session.remove(['pendingPreview', 'pendingPreviewParams']);
@@ -375,6 +382,83 @@ async function openPreview(message, sender) {
   } else {
     // Default: open in new tab
     openPreviewInNewTab(paramsString);
+  }
+}
+
+/**
+ * Convert ArrayBuffer to base64 string
+ */
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+/**
+ * Fetch an external resource (CDN scripts, stylesheets, images, fonts, etc.)
+ * Used to proxy external resources for CSP-compliant inlining
+ * @param {string} url - The external URL to fetch
+ * @param {string} responseType - 'text' for CSS/JS, 'base64' for images/fonts
+ * @returns {Promise<{success: boolean, content?: string, mimeType?: string, error?: string}>}
+ */
+async function fetchExternalResource(url, responseType = 'text') {
+  // Validate protocol
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    return { success: false, error: 'Only http/https URLs are allowed' };
+  }
+
+  const MAX_SIZE = 5 * 1024 * 1024; // 5MB
+  const TIMEOUT_MS = 15000;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'Accept': '*/*'
+      }
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      return { success: false, error: `HTTP ${response.status} for ${url}` };
+    }
+
+    // Check content length if available
+    const contentLength = response.headers.get('Content-Length');
+    if (contentLength && parseInt(contentLength) > MAX_SIZE) {
+      return { success: false, error: `Resource too large (${contentLength} bytes): ${url}` };
+    }
+
+    const contentType = response.headers.get('Content-Type') || 'application/octet-stream';
+
+    if (responseType === 'base64') {
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength > MAX_SIZE) {
+        return { success: false, error: `Resource too large (${buffer.byteLength} bytes): ${url}` };
+      }
+      const base64 = arrayBufferToBase64(buffer);
+      const mimeType = contentType.split(';')[0].trim();
+      return { success: true, content: base64, mimeType };
+    } else {
+      const text = await response.text();
+      if (text.length > MAX_SIZE) {
+        return { success: false, error: `Resource too large (${text.length} bytes): ${url}` };
+      }
+      return { success: true, content: text };
+    }
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      return { success: false, error: `Timeout fetching ${url}` };
+    }
+    return { success: false, error: `Failed to fetch ${url}: ${error.message}` };
   }
 }
 
