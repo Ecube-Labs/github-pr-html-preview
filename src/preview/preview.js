@@ -15,6 +15,10 @@
   const repo = urlParams.get('repo');
   const ref = urlParams.get('ref');
   let currentPath = urlParams.get('path');
+  const historyDebugEnabled =
+    urlParams.get('debugHistory') === '1' ||
+    localStorage.getItem('ghPreviewDebugHistory') === '1';
+  let historyDebugSeq = 0;
 
   // DOM elements
   const filePathEl = document.getElementById('filePath');
@@ -22,6 +26,47 @@
   const refreshBtn = document.getElementById('refreshBtn');
   const previewContainer = document.getElementById('previewContainer');
   const loadingState = document.getElementById('loadingState');
+
+  function debugHistoryLog(stage, payload = {}) {
+    if (!historyDebugEnabled) return;
+    historyDebugSeq += 1;
+    console.log(`[GH Preview][History#${historyDebugSeq}] ${stage}`, {
+      time: new Date().toISOString(),
+      currentPath,
+      url: window.location.href,
+      historyLength: window.history.length,
+      ...payload
+    });
+  }
+
+  function installHistoryDebugHooks() {
+    if (!historyDebugEnabled) return;
+    if (window.__ghPreviewHistoryDebugHooked) return;
+    window.__ghPreviewHistoryDebugHooked = true;
+
+    const originalPushState = window.history.pushState.bind(window.history);
+    const originalReplaceState = window.history.replaceState.bind(window.history);
+
+    window.history.pushState = function(state, title, url) {
+      debugHistoryLog('history.pushState', {
+        state,
+        title,
+        url,
+        stack: new Error().stack
+      });
+      return originalPushState(state, title, url);
+    };
+
+    window.history.replaceState = function(state, title, url) {
+      debugHistoryLog('history.replaceState', {
+        state,
+        title,
+        url,
+        stack: new Error().stack
+      });
+      return originalReplaceState(state, title, url);
+    };
+  }
 
   function setLoadingState(visible, message) {
     if (!loadingState || !loadingState.isConnected) return;
@@ -285,6 +330,104 @@
   }
 
   /**
+   * Convert UTF-8 text into base64 safely (supports non-ASCII characters).
+   */
+  function toBase64Utf8(text) {
+    const bytes = new TextEncoder().encode(text);
+    let binary = '';
+    const CHUNK_SIZE = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+      const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  }
+
+  /**
+   * Build a JavaScript data URL to avoid parser edge cases caused by
+   * literal </script> sequences inside inline script bodies.
+   */
+  function createJavaScriptDataUrl(jsContent) {
+    const base64 = toBase64Utf8(jsContent);
+    return `data:text/javascript;charset=utf-8;base64,${base64}`;
+  }
+
+  function isBareSpecifier(specifier) {
+    return (
+      typeof specifier === 'string' &&
+      !specifier.startsWith('/') &&
+      !specifier.startsWith('./') &&
+      !specifier.startsWith('../') &&
+      !specifier.startsWith('http://') &&
+      !specifier.startsWith('https://') &&
+      !specifier.startsWith('//')
+    );
+  }
+
+  function getBarePackageParent(specifier) {
+    if (!isBareSpecifier(specifier)) return null;
+
+    const parts = specifier.split('/');
+    if (specifier.startsWith('@')) {
+      if (parts.length < 3) return null;
+      return `${parts[0]}/${parts[1]}`;
+    }
+    if (parts.length < 2) return null;
+    return parts[0];
+  }
+
+  function deriveParentImportTarget(childTarget, childSpecifier, parentSpecifier) {
+    if (typeof childTarget !== 'string') return null;
+
+    const suffix = childSpecifier.slice(parentSpecifier.length);
+    if (!suffix.startsWith('/')) return null;
+    if (!childTarget.endsWith(suffix)) return null;
+
+    return childTarget.slice(0, childTarget.length - suffix.length);
+  }
+
+  /**
+   * Normalize import maps so bare parent package specifiers are available
+   * when only subpath mappings are declared (e.g., react-dom/client only).
+   */
+  function normalizeImportMaps(html) {
+    const importMapRegex = /(<script\b[^>]*type=["']importmap["'][^>]*>)([\s\S]*?)(<\/script>)/gi;
+
+    return html.replace(importMapRegex, (fullMatch, openTag, jsonText, closeTag) => {
+      let mapData;
+      try {
+        mapData = JSON.parse(jsonText.trim());
+      } catch {
+        return fullMatch;
+      }
+
+      if (!mapData || typeof mapData !== 'object' || !mapData.imports || typeof mapData.imports !== 'object') {
+        return fullMatch;
+      }
+
+      const imports = mapData.imports;
+      const additions = {};
+
+      for (const [specifier, target] of Object.entries(imports)) {
+        const parent = getBarePackageParent(specifier);
+        if (!parent || imports[parent] || additions[parent]) continue;
+        const parentTarget = deriveParentImportTarget(target, specifier, parent);
+        if (parentTarget) {
+          additions[parent] = parentTarget;
+        }
+      }
+
+      if (Object.keys(additions).length === 0) {
+        return fullMatch;
+      }
+
+      mapData.imports = { ...additions, ...imports };
+      const normalizedJson = JSON.stringify(mapData, null, 2);
+      return `${openTag}\n${normalizedJson}\n${closeTag}`;
+    });
+  }
+
+  /**
    * Process external CSS content: resolve @import rules and url() references
    * @param {string} cssContent - The CSS text content
    * @param {string} cssUrl - The URL the CSS was fetched from (for relative URL resolution)
@@ -418,6 +561,8 @@
    * Handles both repo-local assets (via GitHub API) and external CDN resources (via service worker proxy)
    */
   async function processHtmlAssets(html) {
+    html = normalizeImportMaps(html);
+
     // Detect <base href> for URL resolution
     const baseHref = detectBaseHref(html);
 
@@ -507,8 +652,16 @@
           } else {
             jsContent = await fetchAsset(entry.src);
           }
+          const MAX_SCRIPT_BYTES = 8 * 1024 * 1024; // 8MB safety limit per script
+
           // Remove sourceMappingURL
           jsContent = jsContent.replace(/\/\/[#@]\s*sourceMappingURL=.*/g, '');
+
+          const scriptSize = new TextEncoder().encode(jsContent).byteLength;
+          if (scriptSize > MAX_SCRIPT_BYTES) {
+            throw new Error(`Script too large to embed (${scriptSize} bytes)`);
+          }
+
           return { success: true, content: jsContent };
         } catch (e) {
           console.warn(`[GitHub PR Preview] Failed to fetch JS: ${entry.src}`, e);
@@ -559,16 +712,17 @@
       }
     }
 
-    // Replace script tags with inline scripts
+    // Replace script tags with data URL sources
     for (let i = 0; i < scriptEntries.length; i++) {
       const entry = scriptEntries[i];
       const result = scriptResults[i];
       if (result.status === 'fulfilled' && result.value.success) {
-        // Build inline script tag, preserving type attribute (e.g., type="module")
+        // Build script tag preserving type attribute (e.g., type="module")
         const typeStr = entry.typeAttr ? ` type="${entry.typeAttr}"` : '';
-        const inlineScript = `<script${typeStr}>/* Inlined from: ${entry.src} */\n${result.value.content}<\/script>`;
-        html = html.replace(entry.fullTag, inlineScript);
-        console.log(`[GitHub PR Preview] Inlined JS: ${entry.src}`);
+        const dataUrl = createJavaScriptDataUrl(result.value.content);
+        const scriptTag = `<script${typeStr} src="${dataUrl}"><\/script>`;
+        html = html.replace(entry.fullTag, scriptTag);
+        console.log(`[GitHub PR Preview] Embedded JS as data URL: ${entry.src}`);
       } else {
         const errorMsg = result.status === 'fulfilled' ? result.value.error : result.reason?.message;
         html = html.replace(entry.fullTag, `<!-- Failed to load JS: ${entry.src} (${errorMsg}) -->`);
@@ -798,20 +952,53 @@
   }
   window.XMLHttpRequest = ProxyXHR;
 
+  // Prevent iframe runtime from polluting browser history stack.
+  // Use replaceState semantics for pushState so URL/state can update
+  // without creating extra back-stack entries.
+  (function patchHistoryInRuntime() {
+    if (!window.history || typeof window.history.replaceState !== 'function') return;
+    var origReplaceState = window.history.replaceState.bind(window.history);
+    window.history.pushState = function(state, title, url) {
+      try {
+        origReplaceState(state, title, url);
+      } catch (err) {
+        // Ignore runtime history mutation errors in preview sandbox.
+      }
+    };
+    window.history.replaceState = function(state, title, url) {
+      try {
+        origReplaceState(state, title, url);
+      } catch (err) {
+        // Ignore runtime history mutation errors in preview sandbox.
+      }
+    };
+  })();
+
   // Navigation interceptor: capture clicks on internal HTML links
   document.addEventListener('click', function(e) {
     var link = e.target.closest ? e.target.closest('a[href]') : null;
     if (!link) return;
     var href = link.getAttribute('href');
-    if (!href || /^(https?:|\\/\\/|#|javascript:|mailto:|tel:)/.test(href)) return;
-    if (/\\.html?(#|$)/.test(href)) {
-      e.preventDefault();
-      e.stopPropagation();
-      window.parent.postMessage({
-        type: '__ghPreviewNavigation',
-        href: href
-      }, '*');
-    }
+    if (!href) return;
+    var loweredHref = href.toLowerCase();
+    if (
+      loweredHref.startsWith('http://') ||
+      loweredHref.startsWith('https://') ||
+      loweredHref.startsWith('//') ||
+      loweredHref.startsWith('#') ||
+      loweredHref.startsWith('javascript:') ||
+      loweredHref.startsWith('mailto:') ||
+      loweredHref.startsWith('tel:')
+    ) return;
+    if (link.hasAttribute('download')) return;
+    // Route all internal relative navigations through host so iframe browsing
+    // context does not create extra session-history entries.
+    e.preventDefault();
+    e.stopPropagation();
+    window.parent.postMessage({
+      type: '__ghPreviewNavigation',
+      href: href
+    }, '*');
   }, true);
 
   // Hash scroll listener: parent sends scroll-to-hash requests via postMessage
@@ -853,6 +1040,10 @@
   let sandboxReady = false;
   let pendingRenderPayload = null;
   let sandboxMessageListenerSetup = false;
+  let historyInitialized = false;
+  let lastNavigationKey = '';
+  let lastNavigationTime = 0;
+  let navigationInFlightKey = null;
 
   function ensureSandboxFrame() {
     if (sandboxFrame?.isConnected) return sandboxFrame;
@@ -882,6 +1073,14 @@
       type: 'host-render',
       htmlContent: payload.htmlContent,
       scrollToHash: payload.scrollToHash || null
+    }, '*');
+  }
+
+  function scrollSandboxToHash(hash) {
+    if (!hash || !sandboxFrame?.contentWindow) return;
+    sandboxFrame.contentWindow.postMessage({
+      type: 'host-scroll-to-hash',
+      hash
     }, '*');
   }
 
@@ -926,6 +1125,11 @@
       }
 
       if (data.type === 'renderer-navigate' && data.href) {
+        debugHistoryLog('renderer-navigate', {
+          href: data.href,
+          relayId: data.relayId,
+          relayTime: data.relayTime
+        });
         await handleNavigation(data.href);
       }
     });
@@ -1116,6 +1320,8 @@
    * @param {string} href - Relative or absolute href from link
    */
   async function handleNavigation(href) {
+    debugHistoryLog('handleNavigation:start', { href, inFlight: navigationInFlightKey });
+
     // Remove any hash/anchor from href for path resolution
     const hashIndex = href.indexOf('#');
     const pathPart = hashIndex !== -1 ? href.substring(0, hashIndex) : href;
@@ -1123,17 +1329,86 @@
 
     // Resolve the relative path to absolute path from repo root
     const newPath = resolvePath(currentPath, pathPart);
+    const newHash = hashPart || '';
+    const navigationKey = `${newPath}::${newHash}`;
+    const now = Date.now();
+    const targetUrl = new URL(window.location.href);
+    targetUrl.searchParams.set('path', newPath);
+    targetUrl.searchParams.set('file', newPath);
+    targetUrl.hash = newHash;
+    const currentUrlKey = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    const targetUrlKey = `${targetUrl.pathname}${targetUrl.search}${targetUrl.hash}`;
 
-    console.log(`[GitHub PR Preview] Navigating from ${currentPath} to ${newPath}`);
+    // If URL is already the target, do not create another history entry.
+    if (targetUrlKey === currentUrlKey) {
+      debugHistoryLog('handleNavigation:skip-same-url', {
+        href,
+        targetUrl: targetUrl.href,
+        targetUrlKey,
+        currentUrlKey
+      });
+      if (newHash) {
+        scrollSandboxToHash(newHash);
+      }
+      return;
+    }
 
-    // Update URL parameters (add to history)
-    const newUrl = new URL(window.location);
-    newUrl.searchParams.set('path', newPath);
-    newUrl.searchParams.set('file', newPath);
-    window.history.pushState({ path: newPath }, '', newUrl);
+    // Guard against duplicate navigate events emitted in quick succession.
+    if (navigationKey === lastNavigationKey && now - lastNavigationTime < 500) {
+      debugHistoryLog('handleNavigation:skip-rapid-duplicate', {
+        href,
+        navigationKey,
+        lastNavigationKey,
+        elapsedMs: now - lastNavigationTime
+      });
+      return;
+    }
+    if (navigationInFlightKey === navigationKey) {
+      debugHistoryLog('handleNavigation:skip-inflight-duplicate', {
+        href,
+        navigationKey
+      });
+      return;
+    }
+    lastNavigationKey = navigationKey;
+    lastNavigationTime = now;
 
-    // Load the new HTML file, passing hash for post-load scrolling
-    await loadPreviewForPath(newPath, hashPart || undefined);
+    console.log(`[GitHub PR Preview] Navigating from ${currentPath} to ${newPath}${newHash}`);
+
+    // Same-page hash navigation: keep page, update history, then scroll only.
+    if (newPath === currentPath) {
+      debugHistoryLog('handleNavigation:pushState-hash-only', {
+        href,
+        targetUrl: targetUrl.href,
+        navigationKey
+      });
+      window.history.pushState({ path: newPath, hash: newHash }, '', targetUrl);
+      if (newHash) {
+        scrollSandboxToHash(newHash);
+      }
+      return;
+    }
+
+    // Update URL parameters (add to history) for page navigation
+    navigationInFlightKey = navigationKey;
+    debugHistoryLog('handleNavigation:pushState-page', {
+      href,
+      targetUrl: targetUrl.href,
+      navigationKey
+    });
+    window.history.pushState({ path: newPath, hash: newHash }, '', targetUrl);
+    try {
+      // Load the new HTML file, passing hash for post-load scrolling
+      await loadPreviewForPath(newPath, newHash || undefined);
+    } finally {
+      debugHistoryLog('handleNavigation:complete', {
+        href,
+        navigationKey
+      });
+      if (navigationInFlightKey === navigationKey) {
+        navigationInFlightKey = null;
+      }
+    }
   }
 
   /**
@@ -1180,6 +1455,8 @@
 
   // Initialize
   function init() {
+    installHistoryDebugHooks();
+
     // Set up refresh button
     refreshBtn.addEventListener('click', () => {
       loadPreview();
@@ -1187,12 +1464,51 @@
 
     // Handle browser back/forward navigation
     window.addEventListener('popstate', async (event) => {
-      const targetPath = event.state?.path || urlParams.get('path');
+      const currentUrl = new URL(window.location.href);
+      const targetPath = event.state?.path ||
+        currentUrl.searchParams.get('path') ||
+        currentUrl.searchParams.get('file');
+      const targetHash = event.state?.hash || currentUrl.hash || '';
+
       if (targetPath && targetPath !== currentPath) {
-        console.log('[GitHub PR Preview] Popstate navigation to:', targetPath);
-        await loadPreviewForPath(targetPath);
+        debugHistoryLog('popstate:load-path', {
+          state: event.state,
+          targetPath,
+          targetHash
+        });
+        console.log('[GitHub PR Preview] Popstate navigation to:', targetPath, targetHash);
+        await loadPreviewForPath(targetPath, targetHash || undefined);
+      } else if (targetPath && targetHash) {
+        debugHistoryLog('popstate:hash-only', {
+          state: event.state,
+          targetPath,
+          targetHash
+        });
+        // Same page path but different hash in history
+        scrollSandboxToHash(targetHash);
+      } else {
+        debugHistoryLog('popstate:no-action', {
+          state: event.state,
+          targetPath,
+          targetHash
+        });
       }
     });
+
+    // Ensure the initial entry has state so back/forward can reliably restore path/hash.
+    if (!historyInitialized) {
+      const initialPath = currentPath || filePath || '';
+      window.history.replaceState(
+        { path: initialPath, hash: window.location.hash || '' },
+        '',
+        window.location.href
+      );
+      debugHistoryLog('init:replaceState', {
+        initialPath,
+        initialHash: window.location.hash || ''
+      });
+      historyInitialized = true;
+    }
 
     // Load preview
     loadPreview();

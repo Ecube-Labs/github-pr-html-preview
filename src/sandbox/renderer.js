@@ -1,8 +1,9 @@
 (function() {
   'use strict';
 
-  const runtimeFrame = document.getElementById('runtimeFrame');
+  let runtimeFrame = document.getElementById('runtimeFrame');
   let pendingScrollHash = null;
+  let navigationRelayCounter = 0;
 
   function postToHost(message) {
     window.parent.postMessage(message, '*');
@@ -13,6 +14,27 @@
     runtimeFrame.contentWindow.postMessage(message, '*');
   }
 
+  function handleRuntimeLoad() {
+    postToHost({ type: 'renderer-render-complete' });
+    if (pendingScrollHash) {
+      postToRuntime({
+        type: '__ghPreviewScrollToHash',
+        hash: pendingScrollHash
+      });
+      pendingScrollHash = null;
+    }
+  }
+
+  function replaceRuntimeFrame(htmlContent) {
+    const nextFrame = runtimeFrame.cloneNode(false);
+    nextFrame.removeAttribute('src');
+    nextFrame.removeAttribute('srcdoc');
+    nextFrame.addEventListener('load', handleRuntimeLoad);
+    nextFrame.srcdoc = htmlContent || '';
+    runtimeFrame.replaceWith(nextFrame);
+    runtimeFrame = nextFrame;
+  }
+
   function handleHostMessage(event) {
     if (event.source !== window.parent) return;
     const data = event.data;
@@ -21,7 +43,9 @@
     if (data.type === 'host-render') {
       pendingScrollHash = data.scrollToHash || null;
       postToHost({ type: 'renderer-render-start' });
-      runtimeFrame.srcdoc = data.htmlContent || '';
+      // Recreate runtime iframe each render so inner browsing history is reset.
+      // This prevents iframe history entries from polluting top-level back navigation.
+      replaceRuntimeFrame(data.htmlContent);
       return;
     }
 
@@ -61,23 +85,17 @@
     }
 
     if (data.type === '__ghPreviewNavigation') {
+      navigationRelayCounter += 1;
       postToHost({
         type: 'renderer-navigate',
-        href: data.href
+        href: data.href,
+        relayId: navigationRelayCounter,
+        relayTime: Date.now()
       });
     }
   }
 
-  runtimeFrame.addEventListener('load', () => {
-    postToHost({ type: 'renderer-render-complete' });
-    if (pendingScrollHash) {
-      postToRuntime({
-        type: '__ghPreviewScrollToHash',
-        hash: pendingScrollHash
-      });
-      pendingScrollHash = null;
-    }
-  });
+  runtimeFrame.addEventListener('load', handleRuntimeLoad);
 
   window.addEventListener('message', handleHostMessage);
   window.addEventListener('message', handleRuntimeMessage);
